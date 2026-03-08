@@ -48,6 +48,8 @@ pub const PATTERNS: &[&str] = &[
     r"^aws\s+",
     // PostgreSQL
     r"^psql(\s|$)",
+    // Chezmoi dotfile manager
+    r"^chezmoi\s+(diff|apply|status|managed)",
 ];
 
 pub const RULES: &[RtkRule] = &[
@@ -315,6 +317,15 @@ pub const RULES: &[RtkRule] = &[
         category: "Infra",
         savings_pct: 75.0,
         subcmd_savings: &[],
+        subcmd_status: &[],
+    },
+    // Chezmoi dotfile manager
+    RtkRule {
+        rtk_cmd: "rtk chezmoi",
+        rewrite_prefixes: &["chezmoi"],
+        category: "Dotfiles",
+        savings_pct: 80.0,
+        subcmd_savings: &[("diff", 85.0), ("apply", 90.0), ("managed", 70.0)],
         subcmd_status: &[],
     },
 ];

@@ -2,6 +2,7 @@ mod aws_cmd;
 mod cargo_cmd;
 mod cc_economics;
 mod ccusage;
+mod chezmoi_cmd;
 mod config;
 mod container;
 mod curl_cmd;
@@ -609,6 +610,12 @@ enum Commands {
         since: u64,
     },
 
+    /// chezmoi dotfile manager with compact output
+    Chezmoi {
+        #[command(subcommand)]
+        command: ChezmoiCommands,
+    },
+
     /// Rewrite a raw command to its RTK equivalent (single source of truth for hooks)
     ///
     /// Exits 0 and prints the rewritten command if supported.
@@ -620,6 +627,37 @@ enum Commands {
         /// Raw command to rewrite (e.g. "git status", "cargo test && git push")
         cmd: String,
     },
+}
+
+#[derive(Subcommand)]
+enum ChezmoiCommands {
+    /// Show compact diff of pending dotfile changes
+    Diff {
+        /// chezmoi diff arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Apply dotfile changes → "ok ✓ N files applied"
+    Apply {
+        /// chezmoi apply arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Show status of managed dotfiles (like git status)
+    Status {
+        /// chezmoi status arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// List managed dotfiles grouped by directory
+    Managed {
+        /// chezmoi managed arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Passthrough: any unsupported chezmoi subcommand
+    #[command(external_subcommand)]
+    Other(Vec<OsString>),
 }
 
 #[derive(Subcommand)]
@@ -1756,6 +1794,24 @@ fn main() -> Result<()> {
         Commands::GolangciLint { args } => {
             golangci_cmd::run(&args, cli.verbose)?;
         }
+
+        Commands::Chezmoi { command } => match command {
+            ChezmoiCommands::Diff { args } => {
+                chezmoi_cmd::run(chezmoi_cmd::ChezmoiCommand::Diff, &args, cli.verbose)?;
+            }
+            ChezmoiCommands::Apply { args } => {
+                chezmoi_cmd::run(chezmoi_cmd::ChezmoiCommand::Apply, &args, cli.verbose)?;
+            }
+            ChezmoiCommands::Status { args } => {
+                chezmoi_cmd::run(chezmoi_cmd::ChezmoiCommand::Status, &args, cli.verbose)?;
+            }
+            ChezmoiCommands::Managed { args } => {
+                chezmoi_cmd::run(chezmoi_cmd::ChezmoiCommand::Managed, &args, cli.verbose)?;
+            }
+            ChezmoiCommands::Other(args) => {
+                chezmoi_cmd::run_passthrough(&args, cli.verbose)?;
+            }
+        },
 
         Commands::HookAudit { since } => {
             hook_audit_cmd::run(since, cli.verbose)?;
