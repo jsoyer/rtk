@@ -655,6 +655,19 @@ enum ChezmoiCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Add files to chezmoi source state → "ok ✓ N files added"
+    Add {
+        /// chezmoi add arguments (files/directories to add)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Re-add managed files from target to source state → "ok ✓ N files re-added"
+    #[command(name = "re-add")]
+    ReAdd {
+        /// chezmoi re-add arguments (files/directories to re-add)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Passthrough: any unsupported chezmoi subcommand
     #[command(external_subcommand)]
     Other(Vec<OsString>),
@@ -1807,6 +1820,12 @@ fn main() -> Result<()> {
             }
             ChezmoiCommands::Managed { args } => {
                 chezmoi_cmd::run(chezmoi_cmd::ChezmoiCommand::Managed, &args, cli.verbose)?;
+            }
+            ChezmoiCommands::Add { args } => {
+                chezmoi_cmd::run(chezmoi_cmd::ChezmoiCommand::Add, &args, cli.verbose)?;
+            }
+            ChezmoiCommands::ReAdd { args } => {
+                chezmoi_cmd::run(chezmoi_cmd::ChezmoiCommand::ReAdd, &args, cli.verbose)?;
             }
             ChezmoiCommands::Other(args) => {
                 chezmoi_cmd::run_passthrough(&args, cli.verbose)?;

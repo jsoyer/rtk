@@ -12,6 +12,8 @@ pub enum ChezmoiCommand {
     Apply,
     Status,
     Managed,
+    Add,
+    ReAdd,
 }
 
 pub fn run(cmd: ChezmoiCommand, args: &[String], verbose: u8) -> Result<()> {
@@ -20,6 +22,8 @@ pub fn run(cmd: ChezmoiCommand, args: &[String], verbose: u8) -> Result<()> {
         ChezmoiCommand::Apply => run_apply(args, verbose),
         ChezmoiCommand::Status => run_status(args),
         ChezmoiCommand::Managed => run_managed(args),
+        ChezmoiCommand::Add => run_add_or_readd("add", args, verbose),
+        ChezmoiCommand::ReAdd => run_add_or_readd("re-add", args, verbose),
     }
 }
 
@@ -185,6 +189,53 @@ fn run_managed(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn run_add_or_readd(subcmd: &str, args: &[String], verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
+    let mut cmd = Command::new("chezmoi");
+    cmd.arg(subcmd);
+    // Always pass -v to capture what was processed
+    if !args.iter().any(|a| a == "-v" || a == "--verbose") {
+        cmd.arg("-v");
+    }
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    let output = cmd
+        .output()
+        .with_context(|| format!("Failed to run chezmoi {}", subcmd))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    if !output.status.success() {
+        if !stderr.is_empty() {
+            eprint!("{}", stderr);
+        }
+        if !stdout.is_empty() {
+            print!("{}", stdout);
+        }
+        std::process::exit(output.status.code().unwrap_or(1));
+    }
+
+    // chezmoi prints processed files to stderr with -v
+    let combined = format!("{}{}", stdout, stderr);
+    let action = if subcmd == "re-add" {
+        "re-added"
+    } else {
+        "added"
+    };
+    let filtered = filter_chezmoi_add(&combined, action, verbose);
+    println!("{}", filtered);
+
+    let raw_cmd = format!("chezmoi {} {}", subcmd, args.join(" "));
+    let rtk_cmd = format!("rtk chezmoi {} {}", subcmd, args.join(" "));
+    timer.track(raw_cmd.trim_end(), rtk_cmd.trim_end(), &combined, &filtered);
+
+    Ok(())
+}
+
 // --- Filters ---
 
 lazy_static! {
@@ -303,6 +354,38 @@ pub fn filter_chezmoi_apply(output: &str, verbose: u8) -> String {
         "ok ✓ {} file{} applied",
         lines.len(),
         if lines.len() == 1 { "" } else { "s" }
+    )
+}
+
+pub fn filter_chezmoi_add(output: &str, action: &str, verbose: u8) -> String {
+    let lines: Vec<&str> = output
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    if lines.is_empty() {
+        return format!("ok ✓ (nothing to {})", action);
+    }
+
+    if verbose > 0 {
+        let mut out = format!(
+            "ok ✓ {} file{} {}\n",
+            lines.len(),
+            if lines.len() == 1 { "" } else { "s" },
+            action
+        );
+        for line in &lines {
+            out.push_str(&format!("  {}\n", line));
+        }
+        return out.trim_end().to_string();
+    }
+
+    format!(
+        "ok ✓ {} file{} {}",
+        lines.len(),
+        if lines.len() == 1 { "" } else { "s" },
+        action
     )
 }
 
@@ -534,5 +617,42 @@ mod tests {
             "Expected >=60% savings, got {:.1}%",
             savings
         );
+    }
+
+    #[test]
+    fn test_filter_add_empty() {
+        assert_eq!(
+            filter_chezmoi_add("", "added", 0),
+            "ok ✓ (nothing to added)"
+        );
+    }
+
+    #[test]
+    fn test_filter_add_basic() {
+        let input = "install /home/user/.local/share/chezmoi/dot_zshrc\n";
+        let output = filter_chezmoi_add(input, "added", 0);
+        assert_eq!(output, "ok ✓ 1 file added");
+    }
+
+    #[test]
+    fn test_filter_add_multiple() {
+        let input = "install /home/user/.local/share/chezmoi/dot_zshrc\ninstall /home/user/.local/share/chezmoi/dot_gitconfig\n";
+        let output = filter_chezmoi_add(input, "added", 0);
+        assert_eq!(output, "ok ✓ 2 files added");
+    }
+
+    #[test]
+    fn test_filter_readd_basic() {
+        let input = "update /home/user/.local/share/chezmoi/dot_zshrc\n";
+        let output = filter_chezmoi_add(input, "re-added", 0);
+        assert_eq!(output, "ok ✓ 1 file re-added");
+    }
+
+    #[test]
+    fn test_filter_add_verbose() {
+        let input = "install /home/user/.local/share/chezmoi/dot_zshrc\n";
+        let output = filter_chezmoi_add(input, "added", 1);
+        assert!(output.contains("1 file added"));
+        assert!(output.contains("dot_zshrc"));
     }
 }
