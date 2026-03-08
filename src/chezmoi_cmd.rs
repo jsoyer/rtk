@@ -14,6 +14,9 @@ pub enum ChezmoiCommand {
     Managed,
     Add,
     ReAdd,
+    Update,
+    Unmanaged,
+    Doctor,
 }
 
 pub fn run(cmd: ChezmoiCommand, args: &[String], verbose: u8) -> Result<()> {
@@ -24,6 +27,9 @@ pub fn run(cmd: ChezmoiCommand, args: &[String], verbose: u8) -> Result<()> {
         ChezmoiCommand::Managed => run_managed(args),
         ChezmoiCommand::Add => run_add_or_readd("add", args, verbose),
         ChezmoiCommand::ReAdd => run_add_or_readd("re-add", args, verbose),
+        ChezmoiCommand::Update => run_update(args, verbose),
+        ChezmoiCommand::Unmanaged => run_unmanaged(args),
+        ChezmoiCommand::Doctor => run_doctor(args),
     }
 }
 
@@ -236,11 +242,121 @@ fn run_add_or_readd(subcmd: &str, args: &[String], verbose: u8) -> Result<()> {
     Ok(())
 }
 
+fn run_update(args: &[String], verbose: u8) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
+    let mut cmd = Command::new("chezmoi");
+    cmd.arg("update");
+    // -v lets us see which files were applied
+    if !args.iter().any(|a| a == "-v" || a == "--verbose") {
+        cmd.arg("-v");
+    }
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    let output = cmd.output().context("Failed to run chezmoi update")?;
+
+    // chezmoi update writes git output to stderr and apply output to stderr too
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    if !output.status.success() {
+        if !stderr.is_empty() {
+            eprint!("{}", stderr);
+        }
+        if !stdout.is_empty() {
+            print!("{}", stdout);
+        }
+        std::process::exit(output.status.code().unwrap_or(1));
+    }
+
+    let combined = format!("{}{}", stdout, stderr);
+    let filtered = filter_chezmoi_update(&combined, verbose);
+    println!("{}", filtered);
+
+    let raw_cmd = format!("chezmoi update {}", args.join(" "));
+    let rtk_cmd = format!("rtk chezmoi update {}", args.join(" "));
+    timer.track(raw_cmd.trim_end(), rtk_cmd.trim_end(), &combined, &filtered);
+
+    Ok(())
+}
+
+fn run_unmanaged(args: &[String]) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
+    let mut cmd = Command::new("chezmoi");
+    cmd.arg("unmanaged");
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    let output = cmd.output().context("Failed to run chezmoi unmanaged")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.is_empty() {
+            eprint!("{}", stderr);
+        }
+        std::process::exit(output.status.code().unwrap_or(1));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let filtered = filter_chezmoi_unmanaged(&stdout);
+    println!("{}", filtered);
+    timer.track(
+        "chezmoi unmanaged",
+        "rtk chezmoi unmanaged",
+        &stdout,
+        &filtered,
+    );
+
+    Ok(())
+}
+
+fn run_doctor(args: &[String]) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+
+    let mut cmd = Command::new("chezmoi");
+    cmd.arg("doctor");
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    let output = cmd.output().context("Failed to run chezmoi doctor")?;
+
+    // doctor exits non-zero when warnings/errors are found — still show filtered output
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{}{}", stdout, stderr);
+
+    let filtered = filter_chezmoi_doctor(&combined);
+    println!("{}", filtered);
+
+    timer.track("chezmoi doctor", "rtk chezmoi doctor", &combined, &filtered);
+
+    // Preserve exit code so callers can detect issues
+    if !output.status.success() {
+        std::process::exit(output.status.code().unwrap_or(1));
+    }
+
+    Ok(())
+}
+
 // --- Filters ---
 
 lazy_static! {
     static ref DIFF_FILE_RE: Regex = Regex::new(r"^diff --git a/(.+) b/.+$").unwrap();
     static ref DIFF_HUNK_RE: Regex = Regex::new(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@").unwrap();
+    // "1 file changed, 2 insertions(+), 3 deletions(-)" or "2 files changed, ..."
+    static ref GIT_STAT_RE: Regex =
+        Regex::new(r"(\d+) files? changed").unwrap();
+    // "install /path/to/file" or "update /path/to/file" from chezmoi -v apply output
+    static ref APPLY_LINE_RE: Regex =
+        Regex::new(r"^(?:install|update|remove|mkdir|chmod|run)\s+").unwrap();
+    // chezmoi doctor line: "ok    check (detail)" / "warning    ..." / "error    ..."
+    static ref DOCTOR_LINE_RE: Regex =
+        Regex::new(r"^(ok|warning|error)\s+(.+)$").unwrap();
 }
 
 struct FileSummary {
@@ -387,6 +503,129 @@ pub fn filter_chezmoi_add(output: &str, action: &str, verbose: u8) -> String {
         if lines.len() == 1 { "" } else { "s" },
         action
     )
+}
+
+pub fn filter_chezmoi_update(output: &str, verbose: u8) -> String {
+    // Fast path: nothing was pulled
+    if output.lines().any(|l| l.trim() == "Already up to date.") {
+        return "ok ✓ already up to date".to_string();
+    }
+
+    // Count files changed reported by git (stat summary line)
+    let git_files: usize = GIT_STAT_RE
+        .captures_iter(output)
+        .filter_map(|c| c[1].parse::<usize>().ok())
+        .sum();
+
+    // Count apply lines (files chezmoi actually wrote)
+    let applied: Vec<&str> = output
+        .lines()
+        .filter(|l| APPLY_LINE_RE.is_match(l.trim()))
+        .collect();
+
+    let mut summary = match git_files {
+        0 => "ok ✓ updated".to_string(),
+        n => format!(
+            "ok ✓ updated ({} source file{} changed)",
+            n,
+            if n == 1 { "" } else { "s" }
+        ),
+    };
+
+    if !applied.is_empty() {
+        summary.push_str(&format!(
+            ", {} dotfile{} applied",
+            applied.len(),
+            if applied.len() == 1 { "" } else { "s" }
+        ));
+    }
+
+    if verbose > 0 && !applied.is_empty() {
+        summary.push('\n');
+        for line in &applied {
+            summary.push_str(&format!("  {}\n", line.trim()));
+        }
+        return summary.trim_end().to_string();
+    }
+
+    summary
+}
+
+pub fn filter_chezmoi_unmanaged(output: &str) -> String {
+    let files: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
+
+    if files.is_empty() {
+        return "chezmoi unmanaged: none".to_string();
+    }
+
+    let mut groups: BTreeMap<String, usize> = BTreeMap::new();
+    for file in &files {
+        let dir = if let Some(idx) = file.find('/') {
+            file[..idx].to_string()
+        } else {
+            ".".to_string()
+        };
+        *groups.entry(dir).or_insert(0) += 1;
+    }
+
+    let mut out = format!(
+        "chezmoi unmanaged: {} file{}\n",
+        files.len(),
+        if files.len() == 1 { "" } else { "s" }
+    );
+    for (dir, count) in &groups {
+        let label = if dir == "." {
+            format!("  .  ({})", count)
+        } else {
+            format!("  {}/  ({})", dir, count)
+        };
+        out.push_str(&label);
+        out.push('\n');
+    }
+
+    out.trim_end().to_string()
+}
+
+pub fn filter_chezmoi_doctor(output: &str) -> String {
+    let mut warnings: Vec<&str> = Vec::new();
+    let mut errors: Vec<&str> = Vec::new();
+    let mut ok_count = 0usize;
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if let Some(cap) = DOCTOR_LINE_RE.captures(trimmed) {
+            match &cap[1] {
+                "ok" => ok_count += 1,
+                "warning" => warnings.push(line),
+                "error" => errors.push(line),
+                _ => {}
+            }
+        }
+    }
+
+    // All clear
+    if warnings.is_empty() && errors.is_empty() {
+        return format!("chezmoi doctor: ok ({} checks passed)", ok_count);
+    }
+
+    let mut out = format!(
+        "chezmoi doctor: {} ok, {} warning{}, {} error{}\n",
+        ok_count,
+        warnings.len(),
+        if warnings.len() == 1 { "" } else { "s" },
+        errors.len(),
+        if errors.len() == 1 { "" } else { "s" },
+    );
+    for line in &errors {
+        out.push_str(line.trim());
+        out.push('\n');
+    }
+    for line in &warnings {
+        out.push_str(line.trim());
+        out.push('\n');
+    }
+
+    out.trim_end().to_string()
 }
 
 pub fn filter_chezmoi_status(output: &str) -> String {
@@ -654,5 +893,126 @@ mod tests {
         let output = filter_chezmoi_add(input, "added", 1);
         assert!(output.contains("1 file added"));
         assert!(output.contains("dot_zshrc"));
+    }
+
+    // --- update ---
+
+    #[test]
+    fn test_filter_update_already_up_to_date() {
+        let input = "Already up to date.\n";
+        assert_eq!(filter_chezmoi_update(input, 0), "ok ✓ already up to date");
+    }
+
+    #[test]
+    fn test_filter_update_with_changes() {
+        let input = "From https://github.com/user/dotfiles\n   abc..def  main -> origin/main\nUpdating abc..def\nFast-forward\n dot_zshrc | 3 ++-\n 1 file changed, 2 insertions(+), 1 deletion(-)\ninstall /home/user/.zshrc\n";
+        let output = filter_chezmoi_update(input, 0);
+        assert!(output.contains("ok ✓ updated"));
+        assert!(output.contains("1 source file"));
+        assert!(output.contains("1 dotfile applied"));
+    }
+
+    #[test]
+    fn test_filter_update_multiple_files() {
+        let input = "2 files changed, 5 insertions(+), 2 deletions(-)\ninstall /home/user/.zshrc\ninstall /home/user/.gitconfig\n";
+        let output = filter_chezmoi_update(input, 0);
+        assert!(output.contains("2 source files"));
+        assert!(output.contains("2 dotfiles applied"));
+    }
+
+    #[test]
+    fn test_filter_update_verbose_shows_files() {
+        let input = "1 file changed, 1 insertion(+)\ninstall /home/user/.zshrc\n";
+        let output = filter_chezmoi_update(input, 1);
+        assert!(output.contains("1 dotfile applied"));
+        assert!(output.contains(".zshrc"));
+    }
+
+    #[test]
+    fn test_filter_update_token_savings() {
+        // Simulate a typical git pull + apply output
+        let input = "remote: Enumerating objects: 8, done.\nremote: Counting objects: 100% (8/8), done.\nremote: Compressing objects: 100% (4/4), done.\nremote: Total 5 (delta 2), reused 0 (delta 0)\nUnpacking objects: 100% (5/5), done.\nFrom https://github.com/user/dotfiles\n   abc1234..def5678  main -> origin/main\nUpdating abc1234..def5678\nFast-forward\n dot_zshrc             | 5 ++---\n dot_config/nvim/init  | 3 ++-\n 2 files changed, 6 insertions(+), 2 deletions(-)\ninstall /home/user/.zshrc\ninstall /home/user/.config/nvim/init.lua\n";
+        let output = filter_chezmoi_update(input, 0);
+        let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(input) as f64 * 100.0);
+        assert!(
+            savings >= 60.0,
+            "Expected >=60% savings, got {:.1}%",
+            savings
+        );
+    }
+
+    // --- unmanaged ---
+
+    #[test]
+    fn test_filter_unmanaged_empty() {
+        assert_eq!(filter_chezmoi_unmanaged(""), "chezmoi unmanaged: none");
+    }
+
+    #[test]
+    fn test_filter_unmanaged_basic() {
+        let input = ".cache/foo\n.cache/bar\nDownloads/file.zip\n";
+        let output = filter_chezmoi_unmanaged(input);
+        assert!(output.contains("3 files"));
+        assert!(output.contains(".cache/"));
+        assert!(output.contains("Downloads/"));
+    }
+
+    #[test]
+    fn test_filter_unmanaged_token_savings() {
+        let mut input = String::new();
+        for i in 0..40 {
+            input.push_str(&format!(".cache/something/file{}\n", i));
+        }
+        let output = filter_chezmoi_unmanaged(&input);
+        let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(&input) as f64 * 100.0);
+        assert!(
+            savings >= 60.0,
+            "Expected >=60% savings, got {:.1}%",
+            savings
+        );
+    }
+
+    // --- doctor ---
+
+    #[test]
+    fn test_filter_doctor_all_ok() {
+        let input = "ok    version (v2.45.0)\nok    executable (/usr/bin/chezmoi)\nok    source-dir (/home/user/.local/share/chezmoi)\n";
+        let output = filter_chezmoi_doctor(input);
+        assert_eq!(output, "chezmoi doctor: ok (3 checks passed)");
+    }
+
+    #[test]
+    fn test_filter_doctor_with_warning() {
+        let input = "ok    version (v2.45.0)\nok    executable (/usr/bin/chezmoi)\nwarning    key (no key found)\n";
+        let output = filter_chezmoi_doctor(input);
+        assert!(output.contains("2 ok"));
+        assert!(output.contains("1 warning"));
+        assert!(output.contains("0 error"));
+        assert!(output.contains("key (no key found)"));
+    }
+
+    #[test]
+    fn test_filter_doctor_with_error() {
+        let input = "ok    version (v2.45.0)\nerror    source-dir (/home/user/.local/share/chezmoi: no such file or directory)\nwarning    key (no key found)\n";
+        let output = filter_chezmoi_doctor(input);
+        assert!(output.contains("1 error"));
+        assert!(output.contains("1 warning"));
+        assert!(output.contains("source-dir"));
+    }
+
+    #[test]
+    fn test_filter_doctor_token_savings() {
+        let mut input = String::new();
+        for i in 0..15 {
+            input.push_str(&format!("ok    check-{} (details about check {} here with long path /home/user/.config/something)\n", i, i));
+        }
+        input.push_str("warning    key (no GPG key configured)\n");
+        let output = filter_chezmoi_doctor(&input);
+        let savings = 100.0 - (count_tokens(&output) as f64 / count_tokens(&input) as f64 * 100.0);
+        assert!(
+            savings >= 60.0,
+            "Expected >=60% savings, got {:.1}%",
+            savings
+        );
     }
 }

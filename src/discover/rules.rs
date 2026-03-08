@@ -49,7 +49,7 @@ pub const PATTERNS: &[&str] = &[
     // PostgreSQL
     r"^psql(\s|$)",
     // Chezmoi dotfile manager
-    r"^chezmoi\s+(diff|apply|status|managed|add|re-add)",
+    r"^chezmoi\s+(diff|apply|status|managed|add|re-add|update|unmanaged|doctor)",
 ];
 
 pub const RULES: &[RtkRule] = &[
@@ -331,6 +331,9 @@ pub const RULES: &[RtkRule] = &[
             ("managed", 70.0),
             ("add", 85.0),
             ("re-add", 85.0),
+            ("update", 90.0),
+            ("unmanaged", 70.0),
+            ("doctor", 80.0),
         ],
         subcmd_status: &[],
     },

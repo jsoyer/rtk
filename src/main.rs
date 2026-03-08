@@ -668,6 +668,24 @@ enum ChezmoiCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Pull from git remote and apply changes → compact summary
+    Update {
+        /// chezmoi update arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// List unmanaged files grouped by directory
+    Unmanaged {
+        /// chezmoi unmanaged arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Run chezmoi doctor, show only warnings and errors
+    Doctor {
+        /// chezmoi doctor arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Passthrough: any unsupported chezmoi subcommand
     #[command(external_subcommand)]
     Other(Vec<OsString>),
@@ -1826,6 +1844,15 @@ fn main() -> Result<()> {
             }
             ChezmoiCommands::ReAdd { args } => {
                 chezmoi_cmd::run(chezmoi_cmd::ChezmoiCommand::ReAdd, &args, cli.verbose)?;
+            }
+            ChezmoiCommands::Update { args } => {
+                chezmoi_cmd::run(chezmoi_cmd::ChezmoiCommand::Update, &args, cli.verbose)?;
+            }
+            ChezmoiCommands::Unmanaged { args } => {
+                chezmoi_cmd::run(chezmoi_cmd::ChezmoiCommand::Unmanaged, &args, cli.verbose)?;
+            }
+            ChezmoiCommands::Doctor { args } => {
+                chezmoi_cmd::run(chezmoi_cmd::ChezmoiCommand::Doctor, &args, cli.verbose)?;
             }
             ChezmoiCommands::Other(args) => {
                 chezmoi_cmd::run_passthrough(&args, cli.verbose)?;
